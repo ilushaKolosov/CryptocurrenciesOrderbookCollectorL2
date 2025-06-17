@@ -10,7 +10,7 @@ from config import TOP_CRYPTO_SYMBOLS
 
 
 class OptimizedDatasetExporter:
-    """Оптимизированный экспортер готового датасета для LSTM+LightGBM (~50-60 фичей)"""
+    """Оптимизированный экспортер готового датасета для LSTM+LightGBM (~50-60 фичей) с multi-task таргетами"""
     
     def __init__(self):
         self.engine = create_engine(DATABASE_URL)
@@ -46,6 +46,14 @@ class OptimizedDatasetExporter:
             'total_pressure': total_pressure
         }
     
+    def find_orderbook_wall_level(self, volumes, threshold=0.15):
+        """Находит ближайший уровень с крупной стеной (относительно mid_price)"""
+        total = sum(volumes)
+        for i, v in enumerate(volumes):
+            if v > threshold * total:
+                return i + 1  # уровень (1-индексация)
+        return np.nan  # если стены нет
+
     def extract_optimized_features(self, bids, asks, depth=100):
         """Оптимизированное извлечение признаков (вместо 400 фичей - ~50)"""
         features = {}
@@ -151,6 +159,18 @@ class OptimizedDatasetExporter:
         
         return features
     
+    def add_targets(self, df, future_shift=30, wall_threshold=0.15):
+        """Добавляет multi-task таргеты: классификация (рост/падение) и регрессия (уровень для лимитного ордера)"""
+        # Классификация: рост/падение future_mid_price
+        df['future_mid_price'] = df['mid_price'].shift(-future_shift)
+        df['target_updown'] = (df['future_mid_price'] > df['mid_price']).astype(int)
+        # Регрессия: ближайший уровень крупной bid/ask-стены
+        bid_cols = [f'bid_volume_{i+1}' for i in range(10)]
+        ask_cols = [f'ask_volume_{i+1}' for i in range(10)]
+        df['bid_wall_level'] = df[bid_cols].apply(lambda row: self.find_orderbook_wall_level(row.values, wall_threshold), axis=1)
+        df['ask_wall_level'] = df[ask_cols].apply(lambda row: self.find_orderbook_wall_level(row.values, wall_threshold), axis=1)
+        return df
+
     def export_dataset(self, symbol: str, start_time: datetime, end_time: datetime, output_dir: str):
         """Экспорт готового датасета"""
         query = text("""
@@ -184,6 +204,9 @@ class OptimizedDatasetExporter:
         
         if data_rows:
             df = pd.DataFrame(data_rows)
+            
+            # Добавляем multi-task targets
+            df = self.add_targets(df, future_shift=30, wall_threshold=0.15)
             
             # Создаем директорию если не существует
             os.makedirs(output_dir, exist_ok=True)
