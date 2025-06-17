@@ -1,34 +1,34 @@
-# Binance L2 Orderbook Dataset Collector
+# Cryptocurrencies L2 Orderbook Collector & Feature Engineering
 
-Система для сбора и генерации готового датасета L2 orderbook с Binance для обучения LSTM и LightGBM моделей предсказания движения цен.
+Система для сбора, хранения и генерации оптимизированного датасета L2 orderbook с Binance для гибридных моделей: CNN+LSTM+CatBoost (и Boruta).
 
 ## 🎯 Цель проекта
 
 Создать автоматизированную систему, которая:
 1. **Собирает** L2 orderbook данные с Binance (100 уровней глубины)
-2. **Вычисляет** 439+ признаков для ML моделей
-3. **Генерирует** готовые датасеты для LSTM и LightGBM
+2. **Вычисляет** оптимизированные (~50-60) и derived признаки для ML/DL моделей
+3. **Генерирует** датасеты для гибридных пайплайнов (CNN+LSTM+CatBoost)
 4. **Работает** в реальном времени с частотой 1 секунда
 
 ## 🏗️ Архитектура системы
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Binance API   │───▶│  WebSocket      │───▶│  In-Memory      │
-│   (REST + WS)   │    │  (100ms)        │    │  Cache          │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-                                                        │
-                                                        ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│  PostgreSQL     │◀───│  Feature        │◀───│  Orderbook      │
-│  Database       │    │  Calculator     │    │  Processor      │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-        │                        │                        │
-        ▼                        ▼                        ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│  Raw Orderbook  │    │  439+ Features  │    │  CSV Datasets   │
-│  Data           │    │  (LSTM+GBM)     │    │  in dataset/    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
+┌───────────────┐    ┌───────────────┐    ┌───────────────┐
+│ Binance API   │──▶│ WebSocket     │──▶│ In-Memory     │
+│ (REST + WS)   │   │ (100ms)       │   │ Cache         │
+└───────────────┘    └───────────────┘    └───────────────┘
+                                               │
+                                               ▼
+┌───────────────┐    ┌───────────────┐    ┌───────────────┐
+│ PostgreSQL    │◀──│ Feature       │◀──│ Orderbook     │
+│ Database      │   │ Calculator    │   │ Processor     │
+└───────────────┘    └───────────────┘    └───────────────┘
+      │                      │                      │
+      ▼                      ▼                      ▼
+┌───────────────┐    ┌───────────────┐    ┌───────────────┐
+│ Raw Orderbook │    │ Features      │    │ CSV Datasets  │
+│ Data          │    │ (Optimized)   │    │ in dataset/   │
+└───────────────┘    └───────────────┘    └───────────────┘
 ```
 
 ## 📊 Отслеживаемые криптовалюты
@@ -67,15 +67,15 @@ Binance WebSocket → Обновления orderbook → Обновление к
 
 ### 3. Обработка данных
 ```
-PostgreSQL → Feature Calculator → 439+ признаков → CSV файлы в dataset/
+PostgreSQL → Feature Calculator → оптимизированные признаки → CSV файлы в dataset/
 ```
 
 ### 4. Экспорт датасетов
 ```
-PostgreSQL → Dataset Exporter → Готовые датасеты для ML
+PostgreSQL → Dataset Exporter → Готовые датасеты для ML/DL
 ```
 
-## 🧮 Подробное описание признаков (439+ фичей)
+## 🧮 ОПТИМИЗИРОВАННЫЕ ФИЧИ (~50-60)
 
 ### 📈 Базовые ценовые признаки (3 фичи)
 - **mid_price**: средняя цена между лучшим bid и ask
@@ -159,8 +159,8 @@ pressure = volume × weight × (1 - distance)  # Давление на уров�
 
 ```
 ├── binance_orderbook_collector_v2.py  # Основной сборщик данных
-├── feature_calculator.py              # Вычисление 439+ признаков
-├── export_for_lstm_gbm.py             # Экспорт готовых датасетов
+├── feature_calculator.py              # Оптимизированные признаки
+├── export_for_lstm_gbm.py             # Экспорт датасетов
 ├── run_docker.py                      # Запуск в Docker (асинхронно)
 ├── config.py                          # Конфигурация системы
 ├── database.py                        # Модели PostgreSQL
@@ -199,14 +199,14 @@ python run_docker.py
 ## 📊 Выходные файлы
 
 ### Реальное время (dataset/)
-- `dataset/dataset_{symbol}_{date}.csv` - датасет для каждого символа
+- `dataset/dataset_{symbol}_{date}.csv` - оптимизированные датасеты
 - Обновляется каждую секунду
-- Содержит 439+ признаков
+- Содержит 50-60 признаков
 
 ### Экспорт датасетов
-- `{symbol}_dataset_YYYYMMDD_HHMMSS.csv` - полный датасет
-- `{symbol}_lstm_matrix_YYYYMMDD_HHMMSS.npy` - матрица для LSTM
-- `all_symbols_dataset_{hours}h.csv` - объединенный датасет
+- `{symbol}_optimized_lstm_matrix_{date}.npy` - numpy-матрицы для DL
+- `{symbol}_optimized_dataset_{date}.csv` - оптимизированный датасет
+- `all_symbols_optimized_dataset_{hours}h.csv` - объединенный оптимизированный датасет
 
 ## 🔧 Экспорт датасетов
 
@@ -238,8 +238,8 @@ TOP_CRYPTO_SYMBOLS = [...]               # Список символов
 import numpy as np
 import pandas as pd
 
-# Загружаем матрицу для LSTM
-lstm_matrix = np.load('dataset/BTCUSDT_lstm_matrix_20241201_20241202.npy')
+# Загружаем numpy-матрицу для LSTM
+lstm_matrix = np.load('dataset/BTCUSDT_optimized_lstm_matrix_20241201_20241202.npy')
 print(f"Форма: {lstm_matrix.shape}")  # (samples, timesteps, features)
 
 # Используем нормализованные цены и объемы
@@ -253,7 +253,7 @@ import pandas as pd
 import lightgbm as lgb
 
 # Загружаем датасет
-df = pd.read_csv('dataset/BTCUSDT_dataset_20241201_20241202.csv')
+df = pd.read_csv('dataset/BTCUSDT_optimized_dataset_20241201_20241202.csv')
 
 # Выбираем признаки для LightGBM
 gbm_features = [
@@ -281,13 +281,13 @@ y = df['price_change_1sec'].shift(-1)  # Предсказываем следую
 
 ## 🎯 Результат
 
-Готовый датасет для обучения ML моделей с:
-- **439+ признаками** для каждого временного среза
+Оптимизированный датасет для обучения ML моделей с:
+- **50-60 признаками** для каждого временного среза
 - **100 уровнями** orderbook глубины
 - **Market Pressure** метриками
 - **Временными рядами** изменений
 - **Автоматическим** обновлением каждую секунду
-- **Готовыми** CSV файлами для LSTM и LightGBM
+- **Оптимизированными** CSV файлами для LSTM и LightGBM
 
 ## 🔬 Научная основа
 
@@ -296,3 +296,24 @@ y = df['price_change_1sec'].shift(-1)  # Предсказываем следую
 - **High-Frequency Trading** - анализ рыночных данных
 - **Time Series Analysis** - временные ряды в финансах
 - **Machine Learning** - LSTM и Gradient Boosting для предсказания цен 
+
+## 🤖 Гибридный ML/DL пайплайн
+
+1. **CNN+LSTM** — извлекает скрытые паттерны из временного ряда стакана (сырые уровни)
+2. **CatBoost** — работает с derived features и скрытыми признаками из DL
+3. **Boruta** — отбирает наиболее важные табличные признаки
+
+**Вход для CNN+LSTM:**
+- Последовательность стаканов за N секунд: `[batch, time, features]`, где features — только сырые уровни
+
+**Вход для CatBoost:**
+- Derived features + скрытые признаки из CNN+LSTM
+
+## 📚 Зависимости
+
+- websockets, aiohttp, sqlalchemy, psycopg2-binary, pandas, numpy, psutil, python-dotenv
+
+## 📝 Авторы и поддержка
+
+- Проект оптимизирован для гибридных пайплайнов (DL+ML) и реального времени
+- Вопросы и предложения — через issues или pull requests 
