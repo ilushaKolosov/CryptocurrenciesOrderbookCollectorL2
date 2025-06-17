@@ -12,12 +12,20 @@ import os
 
 
 class OptimizedFeatureCalculator:
-    """Оптимизированный сервис для вычисления признаков из orderbook (~50-60 фичей)"""
+    """Оптимизированный сервис для вычисления признаков из orderbook (~50-60 фичей) с multi-task таргетами"""
     
     def __init__(self):
         self.engine = create_engine(DATABASE_URL)
         self.is_running = False
         self.last_calculation_time = {}
+        
+    def find_orderbook_wall_level(self, volumes, threshold=0.15):
+        """Находит ближайший уровень с крупной стеной (относительно mid_price)"""
+        total = sum(volumes)
+        for i, v in enumerate(volumes):
+            if v > threshold * total:
+                return i + 1  # уровень (1-индексация)
+        return np.nan  # если стены нет
         
     def calculate_market_pressure(self, bids, asks, depth=100):
         """Вычисление market pressure (давления рынка)"""
@@ -154,6 +162,62 @@ class OptimizedFeatureCalculator:
         features['volume_ratio_top50'] = sum(bid_volumes[:50]) / sum(ask_volumes[:50]) if sum(ask_volumes[:50]) > 0 else 1.0
         
         return features
+
+    def add_targets_and_walls(self, features: dict, symbol: str, future_shift: int = 30, wall_threshold: float = 0.15):
+        """Добавляет multi-task таргеты и уровни стен"""
+        try:
+            # Получаем будущую цену для таргета
+            end_time = datetime.utcnow()
+            start_time = end_time - timedelta(seconds=future_shift + 10)
+            
+            query = text("""
+                SELECT timestamp, bids, asks
+                FROM orderbook_entries 
+                WHERE symbol = :symbol 
+                AND timestamp >= :start_time 
+                AND timestamp <= :end_time
+                ORDER BY timestamp ASC
+                LIMIT 10
+            """)
+            
+            with self.engine.connect() as conn:
+                result = conn.execute(query, {
+                    "symbol": symbol, 
+                    "start_time": start_time, 
+                    "end_time": end_time
+                })
+                
+                future_prices = []
+                for row in result:
+                    bids = json.loads(row.bids)
+                    asks = json.loads(row.asks)
+                    if bids and asks:
+                        future_mid_price = (bids[0]['price'] + asks[0]['price']) / 2
+                        future_prices.append(future_mid_price)
+            
+            # Добавляем future_mid_price и target_updown
+            if future_prices:
+                features['future_mid_price'] = future_prices[0] if len(future_prices) > 0 else features['mid_price']
+                features['target_updown'] = 1 if features['future_mid_price'] > features['mid_price'] else 0
+            else:
+                features['future_mid_price'] = features['mid_price']
+                features['target_updown'] = 0
+            
+            # Добавляем уровни стен
+            bid_volumes = [features.get(f'bid_volume_{i+1}', 0) for i in range(10)]
+            ask_volumes = [features.get(f'ask_volume_{i+1}', 0) for i in range(10)]
+            
+            features['bid_wall_level'] = self.find_orderbook_wall_level(bid_volumes, wall_threshold)
+            features['ask_wall_level'] = self.find_orderbook_wall_level(ask_volumes, wall_threshold)
+            
+        except Exception as e:
+            print(f"⚠️ Ошибка при добавлении таргетов для {symbol}: {e}")
+            features['future_mid_price'] = features['mid_price']
+            features['target_updown'] = 0
+            features['bid_wall_level'] = np.nan
+            features['ask_wall_level'] = np.nan
+        
+        return features
     
     def calculate_time_series_features(self, symbol: str, current_features: dict, window_seconds: int = 30):
         """Вычисление временных рядов признаков"""
@@ -265,6 +329,8 @@ class OptimizedFeatureCalculator:
                     features['symbol'] = symbol
                     
                     features = self.calculate_time_series_features(symbol, features)
+                    
+                    features = self.add_targets_and_walls(features, symbol)
                     
                     await self.save_features_to_csv(features, symbol)
                     
