@@ -25,7 +25,7 @@ class OptimizedFeatureCalculator:
         for i, v in enumerate(volumes):
             if v > threshold * total:
                 return i + 1  # уровень (1-индексация)
-        return np.nan  # если стены нет
+        return 1.0  # значение по умолчанию если стены нет
         
     def calculate_market_pressure(self, bids, asks, depth=100):
         """Вычисление market pressure (давления рынка)"""
@@ -214,8 +214,8 @@ class OptimizedFeatureCalculator:
             print(f"⚠️ Ошибка при добавлении таргетов для {symbol}: {e}")
             features['future_mid_price'] = features['mid_price']
             features['target_updown'] = 0
-            features['bid_wall_level'] = np.nan
-            features['ask_wall_level'] = np.nan
+            features['bid_wall_level'] = 1.0  # Значение по умолчанию вместо np.nan
+            features['ask_wall_level'] = 1.0  # Значение по умолчанию вместо np.nan
         
         return features
     
