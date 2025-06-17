@@ -11,8 +11,8 @@ import sqlite3
 import os
 
 
-class FeatureCalculator:
-    """Сервис для вычисления признаков из orderbook для LSTM+LightGBM"""
+class OptimizedFeatureCalculator:
+    """Оптимизированный сервис для вычисления признаков из orderbook (~50-60 фичей)"""
     
     def __init__(self):
         self.engine = create_engine(DATABASE_URL)
@@ -24,28 +24,20 @@ class FeatureCalculator:
         if not bids or not asks:
             return {}
         
-        # Вычисляем давление покупок и продаж
         buy_pressure = 0
         sell_pressure = 0
-        
-        # Давление на основе объема и расстояния от mid price
         mid_price = (bids[0]['price'] + asks[0]['price']) / 2
         
         for i, bid in enumerate(bids[:depth]):
-            # Вес уменьшается с расстоянием от лучшей цены
             weight = 1.0 / (i + 1)
-            # Нормализованное расстояние от mid price
             distance = (mid_price - bid['price']) / mid_price
             buy_pressure += bid['volume'] * weight * (1 - distance)
         
         for i, ask in enumerate(asks[:depth]):
-            # Вес уменьшается с расстоянием от лучшей цены
             weight = 1.0 / (i + 1)
-            # Нормализованное расстояние от mid price
             distance = (ask['price'] - mid_price) / mid_price
             sell_pressure += ask['volume'] * weight * (1 - distance)
         
-        # Общее давление рынка
         total_pressure = buy_pressure + sell_pressure
         net_pressure = buy_pressure - sell_pressure
         pressure_ratio = buy_pressure / sell_pressure if sell_pressure > 0 else 1.0
@@ -58,8 +50,8 @@ class FeatureCalculator:
             'total_pressure': total_pressure
         }
     
-    def calculate_features(self, bids, asks, depth=100):
-        """Вычисление признаков для LSTM+LightGBM"""
+    def calculate_optimized_features(self, bids, asks, depth=100):
+        """Оптимизированное вычисление признаков (вместо 400 фичей - ~50)"""
         features = {}
         
         if not bids or not asks:
@@ -80,37 +72,45 @@ class FeatureCalculator:
         pressure_features = self.calculate_market_pressure(bids, asks, depth)
         features.update(pressure_features)
         
-        # Все 100 уровней для LSTM (последовательные данные)
-        bid_prices = []
-        bid_volumes = []
-        ask_prices = []
-        ask_volumes = []
-        
-        for i in range(depth):
+        # 🎯 ОПТИМИЗАЦИЯ: Вместо 100 уровней - ключевые уровни
+        # Топ-10 уровней (самые важные)
+        for i in range(10):
             if i < len(bids):
-                bid_prices.append(bids[i]['price'])
-                bid_volumes.append(bids[i]['volume'])
+                features[f'bid_price_norm_{i+1}'] = (bids[i]['price'] - mid_price) / mid_price
+                features[f'bid_volume_{i+1}'] = bids[i]['volume']
             else:
-                bid_prices.append(0.0)
-                bid_volumes.append(0.0)
+                features[f'bid_price_norm_{i+1}'] = 0.0
+                features[f'bid_volume_{i+1}'] = 0.0
                 
             if i < len(asks):
-                ask_prices.append(asks[i]['price'])
-                ask_volumes.append(asks[i]['volume'])
+                features[f'ask_price_norm_{i+1}'] = (asks[i]['price'] - mid_price) / mid_price
+                features[f'ask_volume_{i+1}'] = asks[i]['volume']
             else:
-                ask_prices.append(0.0)
-                ask_volumes.append(0.0)
+                features[f'ask_price_norm_{i+1}'] = 0.0
+                features[f'ask_volume_{i+1}'] = 0.0
         
-        # Нормализация цен относительно mid_price
-        bid_prices_norm = [(p - mid_price) / mid_price for p in bid_prices]
-        ask_prices_norm = [(p - mid_price) / mid_price for p in ask_prices]
+        # 🎯 ОПТИМИЗАЦИЯ: Ключевые уровни (25, 50, 75, 100)
+        key_levels = [25, 50, 75, 100]
+        for level in key_levels:
+            if level <= len(bids):
+                features[f'bid_price_norm_level_{level}'] = (bids[level-1]['price'] - mid_price) / mid_price
+                features[f'bid_volume_level_{level}'] = bids[level-1]['volume']
+            else:
+                features[f'bid_price_norm_level_{level}'] = 0.0
+                features[f'bid_volume_level_{level}'] = 0.0
+                
+            if level <= len(asks):
+                features[f'ask_price_norm_level_{level}'] = (asks[level-1]['price'] - mid_price) / mid_price
+                features[f'ask_volume_level_{level}'] = asks[level-1]['volume']
+            else:
+                features[f'ask_price_norm_level_{level}'] = 0.0
+                features[f'ask_volume_level_{level}'] = 0.0
         
-        # Добавляем нормализованные цены и объемы для LSTM
-        for i in range(depth):
-            features[f'bid_price_norm_{i+1}'] = bid_prices_norm[i]
-            features[f'ask_price_norm_{i+1}'] = ask_prices_norm[i]
-            features[f'bid_volume_{i+1}'] = bid_volumes[i]
-            features[f'ask_volume_{i+1}'] = ask_volumes[i]
+        # 🎯 ОПТИМИЗАЦИЯ: Агрегированные метрики вместо всех уровней
+        bid_prices = [b['price'] for b in bids[:depth]]
+        bid_volumes = [b['volume'] for b in bids[:depth]]
+        ask_prices = [a['price'] for a in asks[:depth]]
+        ask_volumes = [a['volume'] for a in asks[:depth]]
         
         # Статистические метрики для LightGBM
         total_bid_volume = sum(bid_volumes)
@@ -136,12 +136,28 @@ class FeatureCalculator:
         features['bid_volume_concentration'] = np.sum(np.array(bid_volumes[:10])) / total_bid_volume if total_bid_volume > 0 else 0
         features['ask_volume_concentration'] = np.sum(np.array(ask_volumes[:10])) / total_ask_volume if total_ask_volume > 0 else 0
         
+        # 🎯 ОПТИМИЗАЦИЯ: Дополнительные агрегированные метрики
+        # Квантили цен и объемов
+        features['bid_price_q25'] = np.percentile(bid_prices, 25)
+        features['bid_price_q75'] = np.percentile(bid_prices, 75)
+        features['ask_price_q25'] = np.percentile(ask_prices, 25)
+        features['ask_price_q75'] = np.percentile(ask_prices, 75)
+        
+        features['bid_volume_q25'] = np.percentile(bid_volumes, 25)
+        features['bid_volume_q75'] = np.percentile(bid_volumes, 75)
+        features['ask_volume_q25'] = np.percentile(ask_volumes, 25)
+        features['ask_volume_q75'] = np.percentile(ask_volumes, 75)
+        
+        # Соотношения объемов на разных уровнях
+        features['volume_ratio_top10'] = sum(bid_volumes[:10]) / sum(ask_volumes[:10]) if sum(ask_volumes[:10]) > 0 else 1.0
+        features['volume_ratio_top25'] = sum(bid_volumes[:25]) / sum(ask_volumes[:25]) if sum(ask_volumes[:25]) > 0 else 1.0
+        features['volume_ratio_top50'] = sum(bid_volumes[:50]) / sum(ask_volumes[:50]) if sum(ask_volumes[:50]) > 0 else 1.0
+        
         return features
     
     def calculate_time_series_features(self, symbol: str, current_features: dict, window_seconds: int = 30):
-        """Вычисление временных рядов признаков для секундных данных"""
+        """Вычисление временных рядов признаков"""
         try:
-            # Получаем данные за последние N секунд (вместо минут)
             end_time = datetime.utcnow()
             start_time = end_time - timedelta(seconds=window_seconds)
             
@@ -167,7 +183,6 @@ class FeatureCalculator:
                     bids = json.loads(row.bids)
                     asks = json.loads(row.asks)
                     if bids and asks:
-                        # Вычисляем market pressure для исторических данных
                         pressure = self.calculate_market_pressure(bids, asks)
                         
                         historical_data.append({
@@ -182,10 +197,8 @@ class FeatureCalculator:
                         })
             
             if len(historical_data) > 1:
-                # Сортируем по времени
                 historical_data.sort(key=lambda x: x['timestamp'])
                 
-                # Вычисляем изменения
                 mid_prices = [d['mid_price'] for d in historical_data]
                 spreads = [d['spread'] for d in historical_data]
                 volume_imbalances = [d['volume_imbalance'] for d in historical_data]
@@ -193,7 +206,7 @@ class FeatureCalculator:
                 sell_pressures = [d['sell_pressure'] for d in historical_data]
                 net_pressures = [d['net_pressure'] for d in historical_data]
                 
-                # Изменения цены (для секундных данных)
+                # Изменения цены
                 if len(mid_prices) > 1:
                     current_features['price_change_1sec'] = (mid_prices[-1] - mid_prices[-2]) / mid_prices[-2] * 100
                     current_features['price_change_5sec'] = (mid_prices[-1] - mid_prices[-5]) / mid_prices[-5] * 100 if len(mid_prices) >= 5 else 0
@@ -229,7 +242,6 @@ class FeatureCalculator:
     async def process_symbol_features(self, symbol: str):
         """Обработка признаков для одного символа"""
         try:
-            # Получаем последний orderbook
             query = text("""
                 SELECT timestamp, bids, asks
                 FROM orderbook_entries 
@@ -246,20 +258,17 @@ class FeatureCalculator:
                     bids = json.loads(row.bids)
                     asks = json.loads(row.asks)
                     
-                    # Вычисляем базовые признаки
-                    features = self.calculate_features(bids, asks)
+                    # Используем оптимизированную функцию
+                    features = self.calculate_optimized_features(bids, asks)
                     
-                    # Добавляем временные метки
                     features['timestamp'] = row.timestamp
                     features['symbol'] = symbol
                     
-                    # Вычисляем временные ряды признаки
                     features = self.calculate_time_series_features(symbol, features)
                     
-                    # Сохраняем в CSV
                     await self.save_features_to_csv(features, symbol)
                     
-                    print(f"Вычислены признаки для {symbol}: {len(features)} признаков")
+                    print(f"✅ Оптимизированные признаки для {symbol}: {len(features)} признаков")
                     
         except Exception as e:
             print(f"Ошибка обработки признаков для {symbol}: {e}")
@@ -270,30 +279,21 @@ class FeatureCalculator:
             output_dir = "dataset"
             os.makedirs(output_dir, exist_ok=True)
             filename = f"{output_dir}/dataset_{symbol}_{datetime.utcnow().strftime('%Y%m%d')}.csv"
-            print(f"💾 Попытка сохранения фичей для {symbol} в файл: {filename}")
             
-            # Создаем DataFrame
             df = pd.DataFrame([features])
-            print(f"📊 DataFrame создан: {len(df)} строк, {len(df.columns)} колонок")
             
-            # Добавляем к существующему файлу или создаем новый
             try:
                 existing_df = pd.read_csv(filename)
-                print(f"📁 Найден существующий файл: {filename} с {len(existing_df)} строками")
                 updated_df = pd.concat([existing_df, df], ignore_index=True)
-                print(f"🔄 Объединен с новыми данными: {len(updated_df)} строк")
+                print(f"📁 Обновлен существующий файл: {filename} ({len(updated_df)} строк)")
             except FileNotFoundError:
-                print(f"🆕 Создается новый файл: {filename}")
                 updated_df = df
+                print(f"🆕 Создан новый файл: {filename} ({len(updated_df)} строк)")
             
-            # Сохраняем
             updated_df.to_csv(filename, index=False)
-            print(f"✅ Файл сохранен: {filename} ({len(updated_df)} строк)")
             
         except Exception as e:
             print(f"❌ Ошибка сохранения признаков для {symbol}: {e}")
-            import traceback
-            print(f"🔍 Traceback: {traceback.format_exc()}")
     
     async def run_feature_calculation(self):
         """Основной цикл вычисления признаков"""
@@ -308,24 +308,25 @@ class FeatureCalculator:
                         await self.process_symbol_features(symbol)
                         self.last_calculation_time[symbol] = current_time
                 
-                await asyncio.sleep(1)  # Проверяем каждую секунду (изменено с 10 секунд)
+                await asyncio.sleep(1)
                 
             except Exception as e:
                 print(f"Ошибка в цикле вычисления признаков: {e}")
-                await asyncio.sleep(5)  # Уменьшено с 30 до 5 секунд
+                await asyncio.sleep(5)
     
     async def start(self):
         """Запуск сервиса вычисления признаков"""
-        print("Запуск Feature Calculator для LSTM+LightGBM...")
-        print(f"Интервал вычисления признаков: {FEATURE_CALCULATION_INTERVAL} секунд")
-        print(f"Глубина orderbook: 100 уровней")
+        print("🚀 Запуск ОПТИМИЗИРОВАННОГО Feature Calculator...")
+        print(f"📊 Вместо 439+ фичей - ~50-60 фичей")
+        print(f"⚡ Быстрее обучение, меньше переобучение")
+        print(f"🎯 Символы: {TOP_CRYPTO_SYMBOLS}")
         
         self.is_running = True
         await self.run_feature_calculation()
     
     async def stop(self):
         """Остановка сервиса"""
-        print("Остановка Feature Calculator...")
+        print("Остановка Optimized Feature Calculator...")
         self.is_running = False
 
 
@@ -347,10 +348,9 @@ def wait_for_table(engine, table_name, timeout=60):
 async def main():
     """Главная функция"""
     create_tables()
-    # Wait for the orderbook_entries table to exist
     engine = create_engine(DATABASE_URL)
     wait_for_table(engine, 'orderbook_entries', timeout=10)
-    calculator = FeatureCalculator()
+    calculator = OptimizedFeatureCalculator()
     
     try:
         await calculator.start()

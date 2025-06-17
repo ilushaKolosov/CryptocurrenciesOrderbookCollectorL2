@@ -9,8 +9,8 @@ import os
 from config import TOP_CRYPTO_SYMBOLS
 
 
-class DatasetExporter:
-    """Экспортер готового датасета для LSTM+LightGBM"""
+class OptimizedDatasetExporter:
+    """Оптимизированный экспортер готового датасета для LSTM+LightGBM (~50-60 фичей)"""
     
     def __init__(self):
         self.engine = create_engine(DATABASE_URL)
@@ -46,8 +46,8 @@ class DatasetExporter:
             'total_pressure': total_pressure
         }
     
-    def extract_features(self, bids, asks, depth=100):
-        """Извлечение признаков для LSTM+LightGBM"""
+    def extract_optimized_features(self, bids, asks, depth=100):
+        """Оптимизированное извлечение признаков (вместо 400 фичей - ~50)"""
         features = {}
         
         if not bids or not asks:
@@ -68,37 +68,45 @@ class DatasetExporter:
         pressure = self.calculate_market_pressure(bids, asks, depth)
         features.update(pressure)
         
-        # Все 100 уровней для LSTM
-        bid_prices = []
-        bid_volumes = []
-        ask_prices = []
-        ask_volumes = []
-        
-        for i in range(depth):
+        # 🎯 ОПТИМИЗАЦИЯ: Вместо 100 уровней - ключевые уровни
+        # Топ-10 уровней (самые важные)
+        for i in range(10):
             if i < len(bids):
-                bid_prices.append(bids[i]['price'])
-                bid_volumes.append(bids[i]['volume'])
+                features[f'bid_price_norm_{i+1}'] = (bids[i]['price'] - mid_price) / mid_price
+                features[f'bid_volume_{i+1}'] = bids[i]['volume']
             else:
-                bid_prices.append(0.0)
-                bid_volumes.append(0.0)
+                features[f'bid_price_norm_{i+1}'] = 0.0
+                features[f'bid_volume_{i+1}'] = 0.0
                 
             if i < len(asks):
-                ask_prices.append(asks[i]['price'])
-                ask_volumes.append(asks[i]['volume'])
+                features[f'ask_price_norm_{i+1}'] = (asks[i]['price'] - mid_price) / mid_price
+                features[f'ask_volume_{i+1}'] = asks[i]['volume']
             else:
-                ask_prices.append(0.0)
-                ask_volumes.append(0.0)
+                features[f'ask_price_norm_{i+1}'] = 0.0
+                features[f'ask_volume_{i+1}'] = 0.0
         
-        # Нормализация цен относительно mid_price
-        bid_prices_norm = [(p - mid_price) / mid_price for p in bid_prices]
-        ask_prices_norm = [(p - mid_price) / mid_price for p in ask_prices]
+        # 🎯 ОПТИМИЗАЦИЯ: Ключевые уровни (25, 50, 75, 100)
+        key_levels = [25, 50, 75, 100]
+        for level in key_levels:
+            if level <= len(bids):
+                features[f'bid_price_norm_level_{level}'] = (bids[level-1]['price'] - mid_price) / mid_price
+                features[f'bid_volume_level_{level}'] = bids[level-1]['volume']
+            else:
+                features[f'bid_price_norm_level_{level}'] = 0.0
+                features[f'bid_volume_level_{level}'] = 0.0
+                
+            if level <= len(asks):
+                features[f'ask_price_norm_level_{level}'] = (asks[level-1]['price'] - mid_price) / mid_price
+                features[f'ask_volume_level_{level}'] = asks[level-1]['volume']
+            else:
+                features[f'ask_price_norm_level_{level}'] = 0.0
+                features[f'ask_volume_level_{level}'] = 0.0
         
-        # Добавляем нормализованные цены и объемы для LSTM
-        for i in range(depth):
-            features[f'bid_price_norm_{i+1}'] = bid_prices_norm[i]
-            features[f'ask_price_norm_{i+1}'] = ask_prices_norm[i]
-            features[f'bid_volume_{i+1}'] = bid_volumes[i]
-            features[f'ask_volume_{i+1}'] = ask_volumes[i]
+        # 🎯 ОПТИМИЗАЦИЯ: Агрегированные метрики вместо всех уровней
+        bid_prices = [b['price'] for b in bids[:depth]]
+        bid_volumes = [b['volume'] for b in bids[:depth]]
+        ask_prices = [a['price'] for a in asks[:depth]]
+        ask_volumes = [a['volume'] for a in asks[:depth]]
         
         # Статистические метрики для LightGBM
         total_bid_volume = sum(bid_volumes)
@@ -124,6 +132,23 @@ class DatasetExporter:
         features['bid_volume_concentration'] = np.sum(np.array(bid_volumes[:10])) / total_bid_volume if total_bid_volume > 0 else 0
         features['ask_volume_concentration'] = np.sum(np.array(ask_volumes[:10])) / total_ask_volume if total_ask_volume > 0 else 0
         
+        # 🎯 ОПТИМИЗАЦИЯ: Дополнительные агрегированные метрики
+        # Квантили цен и объемов
+        features['bid_price_q25'] = np.percentile(bid_prices, 25)
+        features['bid_price_q75'] = np.percentile(bid_prices, 75)
+        features['ask_price_q25'] = np.percentile(ask_prices, 25)
+        features['ask_price_q75'] = np.percentile(ask_prices, 75)
+        
+        features['bid_volume_q25'] = np.percentile(bid_volumes, 25)
+        features['bid_volume_q75'] = np.percentile(bid_volumes, 75)
+        features['ask_volume_q25'] = np.percentile(ask_volumes, 25)
+        features['ask_volume_q75'] = np.percentile(ask_volumes, 75)
+        
+        # Соотношения объемов на разных уровнях
+        features['volume_ratio_top10'] = sum(bid_volumes[:10]) / sum(ask_volumes[:10]) if sum(ask_volumes[:10]) > 0 else 1.0
+        features['volume_ratio_top25'] = sum(bid_volumes[:25]) / sum(ask_volumes[:25]) if sum(ask_volumes[:25]) > 0 else 1.0
+        features['volume_ratio_top50'] = sum(bid_volumes[:50]) / sum(ask_volumes[:50]) if sum(ask_volumes[:50]) > 0 else 1.0
+        
         return features
     
     def export_dataset(self, symbol: str, start_time: datetime, end_time: datetime, output_dir: str):
@@ -137,7 +162,7 @@ class DatasetExporter:
             ORDER BY timestamp ASC
         """)
         
-        print(f"Экспорт датасета для {symbol}...")
+        print(f"📊 Экспорт оптимизированного датасета для {symbol}...")
         
         data_rows = []
         
@@ -152,7 +177,7 @@ class DatasetExporter:
                 bids = json.loads(row.bids)
                 asks = json.loads(row.asks)
                 
-                features = self.extract_features(bids, asks)
+                features = self.extract_optimized_features(bids, asks)
                 features['timestamp'] = row.timestamp
                 features['symbol'] = symbol
                 data_rows.append(features)
@@ -164,7 +189,7 @@ class DatasetExporter:
             os.makedirs(output_dir, exist_ok=True)
             
             # Сохраняем полный датасет
-            dataset_file = f"{output_dir}/{symbol}_dataset_{start_time.strftime('%Y%m%d')}_{end_time.strftime('%Y%m%d')}.csv"
+            dataset_file = f"{output_dir}/{symbol}_optimized_dataset_{start_time.strftime('%Y%m%d')}_{end_time.strftime('%Y%m%d')}.csv"
             df.to_csv(dataset_file, index=False)
             
             # Создаем матрицу для LSTM (только числовые признаки)
@@ -172,16 +197,16 @@ class DatasetExporter:
             lstm_matrix = df[numeric_cols].values
             
             # Сохраняем матрицу
-            matrix_file = f"{output_dir}/{symbol}_lstm_matrix_{start_time.strftime('%Y%m%d')}_{end_time.strftime('%Y%m%d')}.npy"
+            matrix_file = f"{output_dir}/{symbol}_optimized_lstm_matrix_{start_time.strftime('%Y%m%d')}_{end_time.strftime('%Y%m%d')}.npy"
             np.save(matrix_file, lstm_matrix)
             
-            print(f"Датасет сохранен:")
-            print(f"  - Полный датасет: {dataset_file} ({len(df)} записей)")
-            print(f"  - LSTM матрица: {matrix_file} (форма: {lstm_matrix.shape})")
+            print(f"✅ Оптимизированный датасет сохранен:")
+            print(f"  📁 Полный датасет: {dataset_file} ({len(df)} записей, {len(df.columns)} фичей)")
+            print(f"  🧠 LSTM матрица: {matrix_file} (форма: {lstm_matrix.shape})")
             
             return df
         else:
-            print("Данные не найдены")
+            print("❌ Данные не найдены")
             return None
     
     def export_all_symbols(self, symbols: list, hours: int = 24, output_dir: str = "dataset"):
@@ -189,9 +214,10 @@ class DatasetExporter:
         end_time = datetime.utcnow()
         start_time = end_time - timedelta(hours=hours)
         
-        print(f"Экспорт датасетов для LSTM+LightGBM")
-        print(f"Период: {start_time} - {end_time}")
-        print(f"Символы: {symbols}")
+        print(f"🚀 Экспорт ОПТИМИЗИРОВАННЫХ датасетов для LSTM+LightGBM")
+        print(f"📅 Период: {start_time} - {end_time}")
+        print(f"🎯 Символы: {symbols}")
+        print(f"📊 Вместо 439+ фичей - ~50-60 фичей")
         print("=" * 60)
         
         all_datasets = []
@@ -200,31 +226,39 @@ class DatasetExporter:
             df = self.export_dataset(symbol, start_time, end_time, output_dir)
             if df is not None:
                 all_datasets.append(df)
+                print(f"✅ {symbol}: {len(df)} записей, {len(df.columns)} фичей")
+            else:
+                print(f"❌ {symbol}: данные не найдены")
         
-        # Создаем объединенный датасет
         if all_datasets:
-            combined_dataset = pd.concat(all_datasets, ignore_index=True)
-            combined_file = f"{output_dir}/all_symbols_dataset_{hours}h.csv"
-            combined_dataset.to_csv(combined_file, index=False)
-            print(f"\nОбъединенный датасет: {combined_file} ({len(combined_dataset)} записей)")
+            # Объединяем все датасеты
+            combined_df = pd.concat(all_datasets, ignore_index=True)
+            combined_file = f"{output_dir}/combined_optimized_dataset_{start_time.strftime('%Y%m%d')}_{end_time.strftime('%Y%m%d')}.csv"
+            combined_df.to_csv(combined_file, index=False)
+            
+            print("=" * 60)
+            print(f"🎉 ОБЪЕДИНЕННЫЙ датасет сохранен: {combined_file}")
+            print(f"📊 Общая статистика:")
+            print(f"   - Записей: {len(combined_df)}")
+            print(f"   - Фичей: {len(combined_df.columns)}")
+            print(f"   - Символов: {len(combined_df['symbol'].unique())}")
+            print(f"   - Период: {combined_df['timestamp'].min()} - {combined_df['timestamp'].max()}")
         
-        print(f"\nЭкспорт завершен. Датасеты сохранены в {output_dir}/")
+        return all_datasets
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Экспорт готового датасета для LSTM+LightGBM")
-    parser.add_argument("--symbol", default="BTCUSDT", help="Торговая пара")
-    parser.add_argument("--hours", type=int, default=24, help="Количество часов для экспорта")
-    parser.add_argument("--output-dir", default="dataset", help="Выходная директория")
-    parser.add_argument("--all-symbols", action="store_true", help="Экспорт всех символов")
+def main():
+    """Главная функция"""
+    parser = argparse.ArgumentParser(description='Экспорт оптимизированных датасетов для LSTM+LightGBM')
+    parser.add_argument('--hours', type=int, default=24, help='Количество часов для экспорта (по умолчанию: 24)')
+    parser.add_argument('--output', type=str, default='dataset', help='Директория для сохранения (по умолчанию: dataset)')
+    parser.add_argument('--symbols', nargs='+', default=TOP_CRYPTO_SYMBOLS, help='Символы для экспорта')
     
     args = parser.parse_args()
     
-    exporter = DatasetExporter()
-    
-    if args.all_symbols:
-        exporter.export_all_symbols(TOP_CRYPTO_SYMBOLS, args.hours, args.output_dir)
-    else:
-        end_time = datetime.utcnow()
-        start_time = end_time - timedelta(hours=args.hours)
-        exporter.export_dataset(args.symbol, start_time, end_time, args.output_dir) 
+    exporter = OptimizedDatasetExporter()
+    exporter.export_all_symbols(args.symbols, args.hours, args.output)
+
+
+if __name__ == "__main__":
+    main() 
